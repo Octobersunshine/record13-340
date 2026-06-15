@@ -75,7 +75,7 @@ def example_dataframe_usage():
 
 def example_different_methods():
     print("\n" + "=" * 60)
-    print("Example 3: Different SMOTE Methods")
+    print("Example 3: Different Oversampling Methods")
     print("=" * 60)
 
     X, y = make_classification(
@@ -86,7 +86,7 @@ def example_different_methods():
         random_state=42,
     )
 
-    methods = ["smote", "borderline", "svm", "adasyn"]
+    methods = ["smote", "borderline", "svm", "adasyn", "random"]
 
     for method in methods:
         print(f"\n--- Method: {method.upper()} ---")
@@ -100,6 +100,32 @@ def example_different_methods():
             print(f"After:  {dict(zip(*np.unique(y_res, return_counts=True)))}")
         except Exception as e:
             print(f"Error: {e}")
+
+
+def example_random_single_sample():
+    print("\n" + "=" * 60)
+    print("Example 7: Random Oversampling with Few Samples")
+    print("=" * 60)
+
+    X = np.array([
+        [1, 2], [2, 3], [3, 4], [4, 5], [5, 6],
+        [100, 100]
+    ])
+    y = np.array([0, 0, 0, 0, 0, 1])
+
+    print(f"Original distribution: {dict(zip(*np.unique(y, return_counts=True)))}")
+    print("\nTrying SMOTE (should fail with helpful message):")
+    try:
+        service = SmoteOversamplingService(method="smote", random_state=42)
+        service.fit_resample(X, y)
+    except ValueError as e:
+        print(f"  Error: {str(e).split(chr(10))[0]}")
+
+    print("\nUsing Random Oversampling (works with 1 sample):")
+    service = SmoteOversamplingService(method="random", random_state=42)
+    X_res, y_res = service.fit_resample(X, y)
+    print(f"  Result: {dict(zip(*np.unique(y_res, return_counts=True)))}")
+    service.print_summary()
 
 
 def example_custom_sampling_strategy():
@@ -186,6 +212,7 @@ if __name__ == "__main__":
     example_custom_sampling_strategy()
     example_combined_sampling()
     example_distribution_analysis()
+    example_random_single_sample()
 
     print("\n" + "=" * 60)
     print("All examples completed!")

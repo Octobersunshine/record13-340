@@ -33,6 +33,8 @@ class SmoteOversamplingService:
             "svm": SVMSMOTE,
             "svmsmote": SVMSMOTE,
             "adasyn": ADASYN,
+            "random": RandomOverSampler,
+            "randomoversampler": RandomOverSampler,
         }
 
         if self.method not in method_map:
@@ -42,10 +44,26 @@ class SmoteOversamplingService:
             )
 
         oversampler_class = method_map[self.method]
+
+        if self.method in ("random", "randomoversampler"):
+            return oversampler_class(
+                sampling_strategy=self.sampling_strategy,
+                random_state=self.random_state,
+                **self.kwargs
+            )
+
+        if self.method == "adasyn":
+            return oversampler_class(
+                sampling_strategy=self.sampling_strategy,
+                random_state=self.random_state,
+                n_neighbors=self.k_neighbors,
+                **self.kwargs
+            )
+
         return oversampler_class(
             sampling_strategy=self.sampling_strategy,
             random_state=self.random_state,
-            k_neighbors=self.k_neighbors if self.method != "adasyn" else None,
+            k_neighbors=self.k_neighbors,
             **self.kwargs
         )
 
@@ -79,10 +97,10 @@ class SmoteOversamplingService:
         return min(distribution.values())
 
     def _adjust_k_neighbors(self, y: np.ndarray) -> int:
-        n_minority = self._get_minority_sample_count(y)
+        if not self._is_knn_based_method():
+            return 0
 
-        if self.method == "adasyn":
-            return n_minority - 1 if n_minority > 1 else 0
+        n_minority = self._get_minority_sample_count(y)
 
         if self.k_neighbors < n_minority:
             return self.k_neighbors
@@ -90,29 +108,41 @@ class SmoteOversamplingService:
         adjusted_k = max(1, n_minority - 1)
 
         if adjusted_k < self.k_neighbors:
+            param_name = "n_neighbors" if self.method == "adasyn" else "k_neighbors"
             warnings.warn(
-                f"少数类样本数 ({n_minority}) 少于 k_neighbors ({self.k_neighbors})。"
-                f"已自动将 k_neighbors 调整为 {adjusted_k}。"
-                f"建议增加少数类样本或减小 k_neighbors 参数以获得更好的过采样效果。"
+                f"少数类样本数 ({n_minority}) 少于 {param_name} ({self.k_neighbors})。"
+                f"已自动将 {param_name} 调整为 {adjusted_k}。"
+                f"建议增加少数类样本或减小 {param_name} 参数以获得更好的过采样效果。"
             )
 
         return adjusted_k
 
+    def _is_knn_based_method(self) -> bool:
+        return self.method in (
+            "smote", "borderline", "borderlinesmote", "svm", "svmsmote", "adasyn"
+        )
+
     def _validate_minority_samples(self, y: np.ndarray):
         n_minority = self._get_minority_sample_count(y)
 
-        if n_minority < 2:
+        if n_minority < 1:
+            raise ValueError("数据集中没有少数类样本，无法进行过采样。")
+
+        if self._is_knn_based_method() and n_minority < 2:
             raise ValueError(
-                f"SMOTE 过采样要求少数类至少有 2 个样本，"
+                f"{self.method.upper()} 过采样要求少数类至少有 2 个样本，"
                 f"但当前少数类只有 {n_minority} 个样本。\n"
                 f"建议方案：\n"
                 f"  1. 收集更多少数类样本\n"
-                f"  2. 使用 RandomOverSampler（随机重复采样）代替 SMOTE\n"
+                f"  2. 使用 method='random' 随机重复采样代替（不要求样本数量）\n"
                 f"  3. 检查数据标注是否正确，是否存在数据泄露或类别划分错误"
             )
 
     def _build_runtime_oversampler(self, y: np.ndarray):
         self._validate_minority_samples(y)
+
+        if not self._is_knn_based_method():
+            return self.oversampler
 
         adjusted_k = self._adjust_k_neighbors(y)
 
@@ -131,10 +161,6 @@ class SmoteOversamplingService:
         oversampler_class = method_map[self.method]
 
         if self.method == "adasyn":
-            if "n_neighbors" in self.kwargs:
-                kwargs = {**self.kwargs, "n_neighbors": adjusted_k}
-            else:
-                kwargs = {**self.kwargs}
             return oversampler_class(
                 sampling_strategy=self.sampling_strategy,
                 random_state=self.random_state,
