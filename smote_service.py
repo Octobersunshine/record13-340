@@ -1,6 +1,7 @@
+import warnings
 import numpy as np
 import pandas as pd
-from imblearn.over_sampling import SMOTE, BorderlineSMOTE, SVMSMOTE, ADASYN
+from imblearn.over_sampling import SMOTE, BorderlineSMOTE, SVMSMOTE, ADASYN, RandomOverSampler
 from imblearn.under_sampling import RandomUnderSampler
 from imblearn.pipeline import Pipeline
 from typing import Optional, Union, Tuple, Dict, Any
@@ -73,6 +74,81 @@ class SmoteOversamplingService:
             "imbalance_ratio": round(imbalance_ratio, 2),
         }
 
+    def _get_minority_sample_count(self, y: np.ndarray) -> int:
+        distribution = self._get_class_distribution(y)
+        return min(distribution.values())
+
+    def _adjust_k_neighbors(self, y: np.ndarray) -> int:
+        n_minority = self._get_minority_sample_count(y)
+
+        if self.method == "adasyn":
+            return n_minority - 1 if n_minority > 1 else 0
+
+        if self.k_neighbors < n_minority:
+            return self.k_neighbors
+
+        adjusted_k = max(1, n_minority - 1)
+
+        if adjusted_k < self.k_neighbors:
+            warnings.warn(
+                f"少数类样本数 ({n_minority}) 少于 k_neighbors ({self.k_neighbors})。"
+                f"已自动将 k_neighbors 调整为 {adjusted_k}。"
+                f"建议增加少数类样本或减小 k_neighbors 参数以获得更好的过采样效果。"
+            )
+
+        return adjusted_k
+
+    def _validate_minority_samples(self, y: np.ndarray):
+        n_minority = self._get_minority_sample_count(y)
+
+        if n_minority < 2:
+            raise ValueError(
+                f"SMOTE 过采样要求少数类至少有 2 个样本，"
+                f"但当前少数类只有 {n_minority} 个样本。\n"
+                f"建议方案：\n"
+                f"  1. 收集更多少数类样本\n"
+                f"  2. 使用 RandomOverSampler（随机重复采样）代替 SMOTE\n"
+                f"  3. 检查数据标注是否正确，是否存在数据泄露或类别划分错误"
+            )
+
+    def _build_runtime_oversampler(self, y: np.ndarray):
+        self._validate_minority_samples(y)
+
+        adjusted_k = self._adjust_k_neighbors(y)
+
+        if adjusted_k == self.k_neighbors and self.method != "adasyn":
+            return self.oversampler
+
+        method_map = {
+            "smote": SMOTE,
+            "borderline": BorderlineSMOTE,
+            "borderlinesmote": BorderlineSMOTE,
+            "svm": SVMSMOTE,
+            "svmsmote": SVMSMOTE,
+            "adasyn": ADASYN,
+        }
+
+        oversampler_class = method_map[self.method]
+
+        if self.method == "adasyn":
+            if "n_neighbors" in self.kwargs:
+                kwargs = {**self.kwargs, "n_neighbors": adjusted_k}
+            else:
+                kwargs = {**self.kwargs}
+            return oversampler_class(
+                sampling_strategy=self.sampling_strategy,
+                random_state=self.random_state,
+                n_neighbors=adjusted_k,
+                **{k: v for k, v in self.kwargs.items() if k != "n_neighbors"}
+            )
+
+        return oversampler_class(
+            sampling_strategy=self.sampling_strategy,
+            random_state=self.random_state,
+            k_neighbors=adjusted_k,
+            **{k: v for k, v in self.kwargs.items() if k != "k_neighbors"}
+        )
+
     def fit_resample(
         self,
         X: Union[np.ndarray, pd.DataFrame, list],
@@ -86,7 +162,9 @@ class SmoteOversamplingService:
 
         self.class_distribution_before = self.analyze_distribution(y_array)
 
-        X_resampled, y_resampled = self.oversampler.fit_resample(X_array, y_array)
+        runtime_oversampler = self._build_runtime_oversampler(y_array)
+
+        X_resampled, y_resampled = runtime_oversampler.fit_resample(X_array, y_array)
 
         self.class_distribution_after = self.analyze_distribution(y_resampled)
 
@@ -175,24 +253,18 @@ class CombinedSamplingService:
         self.over_method = over_method
         self.random_state = random_state
         self.k_neighbors = k_neighbors
-        self.pipeline = self._create_pipeline()
         self.class_distribution_before = None
         self.class_distribution_after = None
-
-    def _create_pipeline(self):
-        over = SmoteOversamplingService(
+        self._smote_service = SmoteOversamplingService(
             method=self.over_method,
             sampling_strategy=self.over_sampling_strategy,
             random_state=self.random_state,
             k_neighbors=self.k_neighbors,
-        ).oversampler
-
-        under = RandomUnderSampler(
+        )
+        self._under_sampler = RandomUnderSampler(
             sampling_strategy=self.under_sampling_strategy,
             random_state=self.random_state,
         )
-
-        return Pipeline([("over", over), ("under", under)])
 
     def fit_resample(
         self,
@@ -209,7 +281,9 @@ class CombinedSamplingService:
             y_array
         )
 
-        X_resampled, y_resampled = self.pipeline.fit_resample(X_array, y_array)
+        X_over, y_over = self._smote_service.fit_resample(X_array, y_array)
+
+        X_resampled, y_resampled = self._under_sampler.fit_resample(X_over, y_over)
 
         self.class_distribution_after = SmoteOversamplingService._get_class_distribution(
             y_resampled
